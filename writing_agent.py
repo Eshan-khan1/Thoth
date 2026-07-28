@@ -834,9 +834,15 @@ def _restore_missing_closing_lines(original: str, rewritten: str) -> str:
     return result.strip()
 
 
-def _rewrite_length_bounds(instruction: str) -> tuple[float, float]:
+def _rewrite_word_count(text: str) -> int:
+    return len(re.findall(r"[a-z0-9']+", text.lower()))
+
+
+def _rewrite_length_bounds(instruction: str, *, orig_words: int = 0) -> tuple[float, float]:
     if _is_concise_rewrite_instruction(instruction):
         return 0.40, 1.0
+    if orig_words <= 4:
+        return 0.50, 2.0
     return 0.85, 1.15
 
 
@@ -851,9 +857,9 @@ def check_rewrite_quality(
     if not result:
         issues.append("empty")
 
-    orig_words = len(source.split())
-    out_words = len(result.split())
-    min_ratio, max_ratio = _rewrite_length_bounds(instruction)
+    orig_words = _rewrite_word_count(source)
+    out_words = _rewrite_word_count(result)
+    min_ratio, max_ratio = _rewrite_length_bounds(instruction, orig_words=orig_words)
     ratio = out_words / max(orig_words, 1)
     if orig_words and (ratio < min_ratio or ratio > max_ratio):
         issues.append("length_ratio")
@@ -1362,8 +1368,9 @@ def _strip_excess_rewrite_sentences(
     if original_count == 0:
         return rewritten
 
-    max_allowed = original_count + (0 if _is_concise_rewrite_instruction(instruction) else 1)
-    if len(_split_sentences(rewritten)) <= max_allowed:
+    rewritten_count = _rewrite_content_line_count(rewritten)
+    max_allowed = original_count
+    if rewritten_count <= max_allowed:
         return rewritten
     paragraphs = rewritten.split("\n\n")
     all_sentences: list[str] = []
@@ -1420,6 +1427,116 @@ def _fix_rewrite_exclamation_marks(original: str, rewritten: str) -> str:
     return result
 
 
+def _normalize_rewrite_match_text(text: str) -> str:
+    lowered = text.lower().strip()
+    lowered = re.sub(r"[—–\-]+", " ", lowered)
+    lowered = re.sub(r"[^\w\s']+", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _prefix_is_added_opener(prefix: str) -> bool:
+    stripped = prefix.strip()
+    if not stripped:
+        return False
+    for line in stripped.replace("\r\n", "\n").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        for sentence in _split_sentences(line):
+            cleaned = sentence.strip()
+            if not cleaned:
+                continue
+            if (
+                _rewrite_line_is_standalone_greeting(cleaned)
+                or _rewrite_line_is_greeting(cleaned)
+                or _rewrite_sentence_is_filler(cleaned)
+            ):
+                continue
+            return False
+    return True
+
+
+def _strip_prepended_opener_before_original(original: str, rewritten: str) -> str:
+    source = original.strip()
+    result = rewritten.strip()
+    if not source or not result:
+        return result
+
+    source_norm = _normalize_rewrite_match_text(source)
+    result_norm = _normalize_rewrite_match_text(result)
+    if not source_norm or source_norm not in result_norm:
+        return result
+
+    idx = result_norm.find(source_norm)
+    if idx <= 0:
+        return result
+
+    # Map normalized index back to rewritten text by scanning word positions.
+    source_words = source_norm.split()
+    result_words = result_norm.split()
+    if not source_words or result_words[-len(source_words) :] != source_words:
+        return result
+
+    leading_word_count = len(result_words) - len(source_words)
+    if leading_word_count <= 0:
+        return result
+
+    word_matches = list(re.finditer(r"\S+", result))
+    if len(word_matches) <= leading_word_count:
+        return result
+
+    cut_at = word_matches[leading_word_count].start()
+    prefix = result[:cut_at]
+    if not _prefix_is_added_opener(prefix):
+        return result
+    return result[cut_at:].lstrip(" ,;—–-.:")
+
+
+def _restore_original_casing(original: str, rewritten: str) -> str:
+    source = original.strip()
+    result = rewritten.strip()
+    if not source or not result:
+        return result
+
+    source_norm = _normalize_rewrite_match_text(source)
+    result_norm = _normalize_rewrite_match_text(result)
+    if not source_norm or source_norm not in result_norm:
+        return result
+
+    start = result_norm.find(source_norm)
+    if start < 0:
+        return result
+
+    # Walk original characters to restore casing on the matching span in rewritten.
+    source_chars = list(source)
+    result_chars = list(result)
+    source_idx = 0
+    result_idx = 0
+    match_started = False
+
+    while source_idx < len(source_chars) and result_idx < len(result_chars):
+        source_char = source_chars[source_idx]
+        result_char = result_chars[result_idx]
+        if not source_char.strip():
+            source_idx += 1
+            continue
+        if not result_char.strip():
+            result_idx += 1
+            continue
+        if source_char.lower() != result_char.lower():
+            if not match_started:
+                result_idx += 1
+                continue
+            break
+        if source_char.isalpha():
+            result_chars[result_idx] = source_char
+            match_started = True
+        source_idx += 1
+        result_idx += 1
+
+    return "".join(result_chars)
+
+
 def _fix_rewrite_leading_artifacts(text: str) -> str:
     return re.sub(r"^[\s.,;:!?\-–—]+", "", text).strip()
 
@@ -1438,10 +1555,12 @@ def apply_rewrite_hard_filters(
     result = _remove_added_greeting_signoff_lines(source, result)
     result = _remove_added_content_lines(source, result)
     result = _remove_added_filler_sentences(source, result)
+    result = _strip_prepended_opener_before_original(source, result)
     result = _strip_added_thanks_closing(source, result)
     result = _strip_excess_rewrite_sentences(source, result, instruction=instruction)
     result = _fix_rewrite_exclamation_marks(source, result)
     result = _fix_rewrite_leading_artifacts(result)
+    result = _restore_original_casing(source, result)
     result = _restore_missing_closing_lines(source, result)
     return result.strip()
 

@@ -108,6 +108,37 @@ class RewriteQualityTests(unittest.TestCase):
         )
         self.assertTrue(quality["ok"], quality["issues"])
 
+    def test_filters_strip_prepended_opener_on_short_greeting(self) -> None:
+        original = "Hi there"
+        rewritten = "Hey! Just checking in — hi there."
+        filtered = apply_rewrite_hard_filters(
+            original,
+            rewritten,
+            instruction="Rewrite in a casual, natural tone.",
+        )
+        self.assertNotIn("checking in", filtered.lower())
+        self.assertIn("hi there", filtered.lower())
+
+    def test_filters_strip_added_multiline_content(self) -> None:
+        original = "Hey team!"
+        rewritten = "Dear team,\n\nPlease review the doc."
+        filtered = apply_rewrite_hard_filters(
+            original,
+            rewritten,
+            instruction="Rewrite in a formal tone.",
+        )
+        self.assertNotIn("review", filtered.lower())
+
+    def test_filters_restore_original_casing(self) -> None:
+        original = "Heads up — office closed Monday"
+        rewritten = "Hey! Just wanted to reach out — heads up, office closed Monday."
+        filtered = apply_rewrite_hard_filters(
+            original,
+            rewritten,
+            instruction="Rewrite in a casual, natural tone.",
+        )
+        self.assertTrue(filtered.startswith("Heads up"))
+
     def test_golden_expectations_on_filter_outputs(self) -> None:
         if not GOLDEN_PATH.exists():
             self.skipTest("golden file missing")
